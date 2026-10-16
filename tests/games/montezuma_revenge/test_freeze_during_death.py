@@ -46,6 +46,7 @@ def test_laser_clock_continues_during_death(montezuma_env):
         player_y=jnp.array(20, dtype=jnp.int32),
         lasers_x=state.lasers_x.at[0].set(40),
         lasers_active=state.lasers_active.at[0].set(1),
+        # The next native tick is phase 91, the final active laser phase.
         native_frame_count=jnp.array(59, dtype=jnp.int32),
         laser_cycle=jnp.array(90, dtype=jnp.int32)
     )
@@ -53,13 +54,19 @@ def test_laser_clock_continues_during_death(montezuma_env):
     obs, state, reward, done, info = env.step(state, 0)
     assert state.death_timer > 0
     
-    laser_cycle_at_death = state.laser_cycle
+    assert state.laser_cycle == 91
+    death_position = (int(state.player_x), int(state.player_y))
+    death_timer = int(state.death_timer)
     
-    # Step again
-    obs, state, reward, done, info = env.step(state, 0)
-    assert state.death_timer > 0
-    
-    assert state.laser_cycle == (laser_cycle_at_death + 1) % 128
+    # ALE's global clock continues into the inactive interval during death;
+    # the player's death pose remains frozen while the countdown advances.
+    for elapsed, phase in enumerate((92, 93, 94, 95, 96), start=1):
+        obs, state, reward, done, info = env.step(state, 0)
+        assert state.laser_cycle == phase
+        assert state.native_frame_count == 60 + elapsed
+        assert state.death_timer == death_timer - elapsed
+        assert (int(state.player_x), int(state.player_y)) == death_position
+        assert reward == 0
 
 if __name__ == "__main__":
     test_enemies_freeze_during_death()

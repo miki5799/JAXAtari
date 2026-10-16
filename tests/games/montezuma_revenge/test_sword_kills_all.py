@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import pytest
 from jaxtari.games.montezuma_revenge.rooms import load_room
 
 def test_kill_spider_with_sword(montezuma_env):
@@ -33,14 +34,17 @@ def test_kill_spider_with_sword(montezuma_env):
     assert state.enemies_active[0] == 0
     # Sword should be GONE from inventory
     assert state.inventory[1] == 0
+    assert reward == 3000
 
-def test_snake_cannot_be_killed_with_sword(montezuma_env):
+@pytest.mark.parametrize("room_id", [18, 20])
+def test_snake_cannot_be_killed_with_sword(montezuma_env, room_id):
     env = montezuma_env
     key = jax.random.PRNGKey(0)
     obs, state = env.reset(key)
     # Use the room's real snake. The start room's fatal-contact cleanup is
     # specific to its skull and is not a valid setup for this interaction.
-    state = load_room(jnp.array(18, dtype=jnp.int32), state, env.consts)
+    state = load_room(jnp.array(room_id, dtype=jnp.int32), state, env.consts)
+    assert state.enemies_type[0] == 4
     
     initial_lives = state.lives
     
@@ -62,6 +66,7 @@ def test_snake_cannot_be_killed_with_sword(montezuma_env):
     assert state.lives == initial_lives - 1
     assert state.enemies_active[0] == 1
     assert state.inventory[1] == 1
+    assert reward == 0
 
 if __name__ == "__main__":
     test_kill_spider_with_sword()

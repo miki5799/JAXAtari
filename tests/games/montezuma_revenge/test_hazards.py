@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import numpy as np
 import pytest
 
 def test_laser_inactive_cycle(montezuma_env):
@@ -30,15 +31,22 @@ def test_laser_inactive_cycle(montezuma_env):
     assert state.death_timer == 0
 
 
-@pytest.mark.parametrize("native_frame,visible", [(59, True), (60, False), (95, False), (96, True)])
-def test_laser_observation_matches_final_clock(montezuma_env, native_frame, visible):
+@pytest.mark.parametrize("native_frame,phase,visible", [
+    (59, 91, True), (60, 92, False), (95, 127, False), (96, 0, True),
+])
+def test_laser_observation_matches_final_clock(montezuma_env, native_frame, phase, visible):
     from jaxtari.games.montezuma_revenge.rooms import load_room
     env = montezuma_env
     _, state = env.reset(jax.random.PRNGKey(0))
     state = load_room(jnp.int32(14), state, env.consts).replace(
-        native_frame_count=jnp.int32(native_frame), player_x=jnp.int32(76), player_y=jnp.int32(26))
+        native_frame_count=jnp.int32(native_frame),
+        player_x=jnp.int32(76), player_y=jnp.int32(26))
+
     obs, state, _, _, _ = env.step(state, 0)
+
+    assert int(state.laser_cycle) == phase
     assert bool(obs.lasers.active[0]) == visible
+    np.testing.assert_array_equal(obs.lasers.active, env._get_observation(state).lasers.active)
 
 
 def test_platform_observation_on_room_entry(montezuma_env):
@@ -48,6 +56,11 @@ def test_platform_observation_on_room_entry(montezuma_env):
     state = load_room(jnp.int32(18), state, env.consts).replace(
         player_x=jnp.int32(4), player_y=jnp.int32(26),
         native_frame_count=jnp.int32(70), platform_cycle=jnp.int32(92))
+
     obs, state, _, _, _ = env.step(state, 4)
-    assert state.room_id == 17
-    assert (obs.platforms.active == 1).all()
+
+    assert int(state.room_id) == 17
+    assert int(state.transition_pending) == 1
+    assert int(state.platform_cycle) == 0
+    np.testing.assert_array_equal(obs.platforms.active, np.ones(12, dtype=np.int32))
+

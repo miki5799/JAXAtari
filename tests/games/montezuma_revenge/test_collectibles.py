@@ -12,7 +12,7 @@ def test_collect_key(montezuma_env):
     from jaxtari.games.montezuma_revenge.rooms import load_room
     state = load_room(jnp.array(14, dtype=jnp.int32), state, env.consts)
     
-    # Jump from the upper floor into the key.
+    # Jump from the upper floor into the key, as in ALE.
     state = state.replace(
         player_x=jnp.array(128, dtype=jnp.int32),
         player_y=jnp.array(26, dtype=jnp.int32)
@@ -20,20 +20,29 @@ def test_collect_key(montezuma_env):
     
     for action in (1, 0, 0):
         obs, state, reward, done, info = env.step(state, action)
+        assert reward == 0
 
     obs, state, reward, done, info = env.step(state, 0)
     
     assert state.inventory[0] == initial_keys + 1
-    assert state.items_active[0] == obs.items.active[0] == 1
+    assert state.items_active[0] == 1
+    assert obs.items.active[0] == 1
     assert reward == 100
 
-    # The item remains visible throughout the pickup hold.
-    for _ in range(int(state.pickup_timer)):
-        obs, state, _, _, _ = env.step(state, 0)
-        assert state.items_active[0] == obs.items.active[0] == 1
-    obs, state, _, _, _ = env.step(state, 0)
-    assert state.items_active[0] == obs.items.active[0] == 0
+    # ALE retains the item through modes 3 and 4 of the pickup hold.
+    for mode in (3, 4):
+        obs, state, reward, done, info = env.step(state, 0)
+        assert state.native_mode == mode
+        assert state.items_active[0] == 1
+        assert obs.items.active[0] == 1
+        assert state.inventory[0] == initial_keys + 1
+        assert reward == 0
+
+    obs, state, reward, done, info = env.step(state, 0)
+    assert state.items_active[0] == 0
+    assert obs.items.active[0] == 0
     assert state.inventory[0] == initial_keys + 1
+    assert reward == 0
 
 def test_open_door(montezuma_env):
     env = montezuma_env
@@ -112,7 +121,7 @@ def test_kill_enemy_with_sword(montezuma_env):
     # Sword should be GONE from inventory
     assert state.inventory[1] == 0
     # Score should INCREASE
-    assert reward >= 100
+    assert reward == 2000
 
 def test_door_without_key(montezuma_env):
     env = montezuma_env
@@ -156,17 +165,27 @@ def test_collect_torch(montezuma_env):
     
     for action in (1, 0, 0, 0):
         obs, state, reward, done, info = env.step(state, action)
+        assert reward == 0
 
     obs, state, reward, done, info = env.step(state, 0)
     
     # inventory[2] is the torch
     assert state.inventory[2] == 1
-    assert state.items_active[0] == obs.items.active[0] == 1
+    assert state.items_active[0] == 1
+    assert reward == 3000
 
-    # The item remains visible throughout the pickup hold.
-    for _ in range(int(state.pickup_timer)):
-        obs, state, _, _, _ = env.step(state, 0)
-        assert state.items_active[0] == obs.items.active[0] == 1
-    obs, state, _, _, _ = env.step(state, 0)
-    assert state.items_active[0] == obs.items.active[0] == 0
+    # This pickup starts at a different clock phase than the key above.
+    for mode in (6, 6, 6, 3, 4):
+        obs, state, reward, done, info = env.step(state, 0)
+        assert state.native_mode == mode
+        assert state.items_active[0] == 1
+        assert obs.items.active[0] == 1
+        assert state.inventory[2] == 1
+        assert reward == 0
+
+    obs, state, reward, done, info = env.step(state, 0)
+    assert state.items_active[0] == 0
+    assert obs.items.active[0] == 0
+    assert state.inventory[2] == 1
+    assert reward == 0
 

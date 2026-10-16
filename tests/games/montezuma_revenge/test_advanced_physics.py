@@ -1,5 +1,6 @@
 import jax
 import jax.numpy as jnp
+import pytest
 
 def test_conveyor_movement(montezuma_env):
     env = montezuma_env
@@ -82,7 +83,8 @@ def test_jump_off_ladder_impossible(montezuma_env):
     assert state.is_jumping == 0
     assert state.is_falling == 0
 
-def test_no_side_exit_below_upper_corridor(montezuma_env):
+@pytest.mark.parametrize("player_y", [37, 100])
+def test_no_side_exit_below_upper_corridor(montezuma_env, player_y):
     env = montezuma_env
     key = jax.random.PRNGKey(0)
     obs, state = env.reset(key)
@@ -95,7 +97,7 @@ def test_no_side_exit_below_upper_corridor(montezuma_env):
     # ALE holds the side boundary below the upper corridor. A transition
     # here cannot be used to test landing overlap in the neighboring room.
     state = state.replace(player_x=jnp.array(4, jnp.int32),
-                          player_y=jnp.array(37, jnp.int32))
+                          player_y=jnp.array(player_y, jnp.int32))
     
     # Action LEFT (4) to trigger transition
     # JaxtariAction.LEFT is 4

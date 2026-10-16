@@ -1,8 +1,13 @@
 import jax
 import jax.numpy as jnp
+import pytest
 from jaxtari.games.montezuma_revenge.rooms import load_room
 
-def test_collect_amulet(montezuma_env):
+@pytest.mark.parametrize("native_tick,remaining", [
+    (0, 636), (1, 635), (2, 634), (3, 633),
+    (4, 640), (5, 639), (6, 638), (7, 637),
+])
+def test_collect_amulet(montezuma_env, native_tick, remaining):
     env = montezuma_env
     key = jax.random.PRNGKey(0)
     obs, state = env.reset(key)
@@ -15,14 +20,17 @@ def test_collect_amulet(montezuma_env):
     
     state = state.replace(
         player_x=jnp.array(17, dtype=jnp.int32),
-        player_y=jnp.array(7, dtype=jnp.int32)
+        player_y=jnp.array(7, dtype=jnp.int32),
+        native_frame_count=jnp.array(native_tick, dtype=jnp.int32)
     )
     
     obs, state, reward, done, info = env.step(state, 0) # NOOP
     
     # inventory[3] is the amulet
     assert state.inventory[3] == 1
-    assert state.amulet_time == 636  # Native eight-frame phase at reset.
+    # ALE expires the effect on an eight-frame clock boundary. These are
+    # measured remaining native frames, rather than a fresh 640-frame timer.
+    assert state.amulet_time == remaining
     assert reward == 200
 
 def test_amulet_neutralizes_enemies(montezuma_env):

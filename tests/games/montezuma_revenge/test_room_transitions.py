@@ -11,13 +11,13 @@ def _assert_room_change(env, state, action, target, entry_x, entry_y):
     # ALE changes the room in mode 2 while retaining the old player anchor.
     assert (int(state.room_id), int(state.native_mode)) == (target, 2)
     assert (int(state.player_x), int(state.player_y)) == old_position
-    assert not done
+    assert reward == 0 and not done
 
     # The next native frame initializes the entry position and resumes mode 4.
     _, state, reward, done, _ = env.step(state, 0)
     assert (int(state.room_id), int(state.native_mode)) == (target, 4)
     assert (int(state.player_x), int(state.player_y)) == (entry_x, entry_y)
-    assert not done
+    assert reward == 0 and not done
 
 
 @pytest.mark.parametrize("source,target,action,start_x,entry_x", [
