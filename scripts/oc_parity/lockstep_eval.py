@@ -34,7 +34,10 @@ _SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
-from oc_parity.trajectory_io import episode_start_index, snapshot_frame_index
+from oc_parity.trajectory_io import (
+    episode_start_index, episode_start_indices, incoming_action,
+    snapshot_frame_index, transition_action,
+)
 
 
 def _map_oc_action_to_jax(env, oc_action: int, meanings: Optional[Sequence[str]]) -> Any:
@@ -86,7 +89,11 @@ def _valid_t0_candidates(
             start = max(start, int(ball_t))
     if start > max_t0:
         return []
-    return list(range(start, max_t0 + 1))
+    episode_starts = episode_start_indices(traj)
+    return [
+        t0 for t0 in range(start, max_t0 + 1)
+        if episode_starts[t0 + n - 1] == episode_starts[t0]
+    ]
 
 
 def _sample_t0s(
@@ -129,9 +136,9 @@ def _inject_state(env, jax_key: str, traj: Dict[str, Any], t0: int):
         "frame_index": t0,
         "elapsed_frames": snapshot_frame_index(traj, t0),
         "action_meanings": meanings,
-        "oc_action": int(traj["actions"][t0]) if traj.get("actions") is not None else None,
+        "oc_action": incoming_action(traj, t0),
         "prev_oc_action": (
-            int(traj["actions"][t0 - 1])
+            incoming_action(traj, t0 - 1)
             if t0 > episode_start and traj.get("actions") is not None
             else None
         ),
@@ -233,6 +240,10 @@ def run_one_lockstep(
     )
 
     meanings = traj.get("meta", {}).get("action_meanings")
+    if n < 1 or t0 < 0 or t0 + n > len(traj["objects"]):
+        raise ValueError("Lockstep window must contain recorded snapshots")
+    if episode_start_index(traj, t0 + n - 1) != episode_start_index(traj, t0):
+        raise ValueError("Lockstep window crosses an episode reset")
     state = _inject_state(env, jax_key, traj, t0)
     if oracle_lookahead:
         from oc_parity.oracle_lookahead import apply_oracle_lookahead, supports_oracle
@@ -324,7 +335,7 @@ def run_one_lockstep(
         soft_flags.append(bool(frame["soft_breach"]))
 
         if k < n - 1:
-            oc_a = int(traj["actions"][t])
+            oc_a = transition_action(traj, t)
             jax_a = _map_oc_action_to_jax(env, oc_a, meanings)
             _o, state, _r, _d, _i = jitted_step(state, jax_a)
 

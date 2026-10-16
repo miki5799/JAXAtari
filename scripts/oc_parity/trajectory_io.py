@@ -238,6 +238,34 @@ def action_alignment(traj: Mapping[str, Any]) -> str:
     return alignment
 
 
+def transition_action(traj: Mapping[str, Any], t: int) -> int:
+    """Action for snapshot[t] -> snapshot[t+1], in either supported format.
+
+    The recorder stores the action that produced the snapshot on that row.
+    Its first action therefore precedes the first saved snapshot. An outgoing
+    trajectory instead stores the next action; its last row is a placeholder.
+    """
+    if t < 0 or t + 1 >= len(traj["objects"]):
+        raise IndexError(f"No recorded transition after snapshot {t}")
+    if episode_start_index(traj, t + 1) != episode_start_index(traj, t):
+        raise ValueError("Recorded snapshots are separated by an episode reset")
+    index = t + (action_alignment(traj) == "incoming/post-step")
+    return int(traj["actions"][index])
+
+
+def incoming_action(traj: Mapping[str, Any], t: int) -> Optional[int]:
+    """Past action that produced snapshot[t], without reading future actions."""
+    if action_alignment(traj) == "incoming/post-step":
+        index = t
+    else:
+        # An outgoing episode starts with a native reset snapshot. The
+        # previous row belongs to the old episode, not to this state.
+        if t == episode_start_index(traj, t):
+            return None
+        index = t - 1
+    return int(traj["actions"][index]) if index >= 0 else None
+
+
 def episode_start_indices(traj: Mapping[str, Any]) -> np.ndarray:
     """Episode start for every snapshot, computed in one pass over terminal flags."""
     cached = traj.get("_episode_start_indices")

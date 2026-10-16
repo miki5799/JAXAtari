@@ -10,12 +10,21 @@ Each script also supports `--help`.
 
 Record one OCAtari trajectory (actions + objects + RAM + frames) to `.npz`.
 
+Recordings use `frameskip=1` and `repeat_action_probability=0`. Each row is
+a **post-action** snapshot: `actions[t]` produced `objects[t]`, while the
+transition `objects[t] → objects[t+1]` uses `actions[t+1]`. New files mark this
+with `meta.action_alignment="incoming/post-step"`; unlabelled historical
+recorder files use the same interpretation. Explicit `"outgoing/pre-step"`
+files are also supported, using `actions[t]` for that transition. Evaluators
+and renderers share the alignment helper; existing NPZ files are not rewritten.
+
 New recordings also save `frame_indices` (emulated steps since the latest
 reset, including warmup). Montezuma transfer restores `native_frame_count`
 and the hazard phase from this count, and uses recent past
 skull motion, including a compact warmup history. Legacy phase recovery uses
 the saved warmup count and terminal flags; resets inside discarded warmup
-cannot be recovered from old files.
+cannot be recovered from old files. Lockstep windows exclude episode resets.
+Its horizon counts snapshots: `--n 13` evaluates 12 transitions after injection.
 Montezuma transfer still does not reconstruct an active jump/fall phase or
 collected-item history. Prefer grounded start snapshots; equal object positions
 at injection alone do not establish equivalent latent physics states.

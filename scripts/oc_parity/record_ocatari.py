@@ -74,6 +74,7 @@ def make_oc_env(game: str, seed: int, *, render_mode: Optional[str] = "rgb_array
         mode="ram",
         hud=True,
         frameskip=1,
+        repeat_action_probability=0.0,
         obs_mode="obj",
         render_mode=render_mode,
     )
@@ -190,23 +191,19 @@ def _get_rgb(env) -> np.ndarray:
 def _snapshot_step(env, action: int, store_frames: bool) -> Tuple[
     int, float, bool, bool, np.ndarray, List[dict], Optional[np.ndarray]
 ]:
-    """Step OCAtari and snapshot RAM/objects/RGB.
+    """Advance ALE exactly once, then snapshot RAM/objects/RGB.
 
-    Some OC games (notably Frostbite) can fail inside OCAtari's object-obs
-    buffer packing even though ``detect_objects()`` succeeded. Fall back to
-    the underlying ALE step + ``detect_objects`` so recording can continue.
+    The recorder does not use packed object observations. OCAtari can fail
+    while packing them *after* stepping ALE; retrying through ALE would apply
+    the action twice. Use its wrapped Gym environment and detector directly.
     """
-    try:
-        obs, reward, terminated, truncated, info = env.step(int(action))
-        del obs, info
-    except ValueError as exc:
-        # OCAtari ``np.array(self._state_buffer_ns)`` inhomogeneous-shape crash.
-        if "inhomogeneous" not in str(exc) and "sequence" not in str(exc).lower():
-            raise
+    if hasattr(env, "_env") and hasattr(env, "detect_objects"):
         obs, reward, terminated, truncated, info = env._env.step(int(action))
-        del obs, info
-        if hasattr(env, "detect_objects"):
-            env.detect_objects()
+        env.detect_objects()
+    else:
+        # Also supports lightweight test environments / OCAtari adapters.
+        obs, reward, terminated, truncated, info = env.step(int(action))
+    del obs, info
     ram = np.asarray(env.get_ram(), dtype=np.uint8)
     objects = serialize_oc_objects(env.objects)
     frame = _get_rgb(env) if store_frames else None
@@ -479,6 +476,8 @@ def main() -> None:
         "action_meanings": meanings,
         "record_mode": args.mode,
         "skip_frames": int(args.skip_frames),
+        "action_alignment": "incoming/post-step",
+        "repeat_action_probability": 0.0,
         "initial_skull_history": data["initial_skull_history"],
     }
     out_dir = os.path.dirname(os.path.abspath(args.out))
