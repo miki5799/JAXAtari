@@ -109,6 +109,7 @@ def _replay_start_end(
 ) -> Tuple[np.ndarray, np.ndarray, int]:
     """Return (start_strip, end_strip, k_end)."""
     from oc_parity.lockstep_eval import _inject_state, _map_oc_action_to_jax
+    from oc_parity.trajectory_io import transition_action
 
     meanings = traj.get("meta", {}).get("action_meanings")
     state = _inject_state(env, jax_key, traj, t0)
@@ -127,7 +128,7 @@ def _replay_start_end(
 
     for k in range(n_eff - 1):
         t = t0 + k
-        oc_a = int(traj["actions"][t])
+        oc_a = transition_action(traj, t)
         jax_a = _map_oc_action_to_jax(env, oc_a, meanings)
         _o, state, _r, _d, _i = jitted_step(state, jax_a)
 

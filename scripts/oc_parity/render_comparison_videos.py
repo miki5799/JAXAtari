@@ -130,6 +130,7 @@ def _replay_strips(
     label: str,
 ) -> List[np.ndarray]:
     from oc_parity.lockstep_eval import _inject_state, _map_oc_action_to_jax
+    from oc_parity.trajectory_io import transition_action
     from oc_parity.oracle_lookahead import apply_oracle_lookahead, supports_oracle
 
     meanings = traj.get("meta", {}).get("action_meanings")
@@ -155,7 +156,7 @@ def _replay_strips(
         strip = _label_strip(strip, f"{label}  t0={t0}  k={k}", scale)
         frames_out.append(strip)
         if k < n_eff - 1:
-            oc_a = int(traj["actions"][t])
+            oc_a = transition_action(traj, t)
             jax_a = _map_oc_action_to_jax(env, oc_a, meanings)
             _o, state, _r, _d, _i = jitted_step(state, jax_a)
     return frames_out

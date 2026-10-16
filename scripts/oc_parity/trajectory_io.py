@@ -172,6 +172,7 @@ def save_trajectory(
     ram: Sequence[Sequence[int]],
     objects: Sequence[Sequence[Mapping[str, Any]]],
     frames: Optional[Sequence[np.ndarray]] = None,
+    frame_indices: Optional[Sequence[int]] = None,
 ) -> None:
     """Write a trajectory NPZ with meta_json + dense arrays."""
     n = len(actions)
@@ -189,6 +190,10 @@ def save_trajectory(
         "ram": np.asarray(ram, dtype=np.uint8),
     }
     payload.update(_objects_to_arrays(objects))
+    if frame_indices is not None:
+        if len(frame_indices) != n:
+            raise ValueError("frame_indices length must match actions length")
+        payload["frame_indices"] = np.asarray(frame_indices, dtype=np.int32)
     if frames is not None:
         if len(frames) != n:
             raise ValueError("frames length must match actions length")
@@ -218,8 +223,82 @@ def load_trajectory(path: str) -> Dict[str, Any]:
         "ram": np.asarray(data["ram"], dtype=np.uint8),
         "objects": objects,
         "frames": np.asarray(data["frames"], dtype=np.uint8) if "frames" in data else None,
+        "frame_indices": np.asarray(data["frame_indices"], dtype=np.int32) if "frame_indices" in data else None,
     }
+    # Derived once from the recording; replay only reads these arrays.
+    traj["_episode_start_indices"] = episode_start_indices(traj)
     return traj
+
+
+def action_alignment(traj: Mapping[str, Any]) -> str:
+    """Unlabelled historical recorder files contain post-action snapshots."""
+    alignment = traj.get("meta", {}).get("action_alignment", "incoming/post-step")
+    if alignment not in ("incoming/post-step", "outgoing/pre-step"):
+        raise ValueError(f"Unsupported action_alignment: {alignment!r}")
+    return alignment
+
+
+def transition_action(traj: Mapping[str, Any], t: int) -> int:
+    """Action for snapshot[t] -> snapshot[t+1], in either supported format.
+
+    The recorder stores the action that produced the snapshot on that row.
+    Its first action therefore precedes the first saved snapshot. An outgoing
+    trajectory instead stores the next action; its last row is a placeholder.
+    """
+    if t < 0 or t + 1 >= len(traj["objects"]):
+        raise IndexError(f"No recorded transition after snapshot {t}")
+    if episode_start_index(traj, t + 1) != episode_start_index(traj, t):
+        raise ValueError("Recorded snapshots are separated by an episode reset")
+    index = t + (action_alignment(traj) == "incoming/post-step")
+    return int(traj["actions"][index])
+
+
+def incoming_action(traj: Mapping[str, Any], t: int) -> Optional[int]:
+    """Past action that produced snapshot[t], without reading future actions."""
+    if action_alignment(traj) == "incoming/post-step":
+        index = t
+    else:
+        # An outgoing episode starts with a native reset snapshot. The
+        # previous row belongs to the old episode, not to this state.
+        if t == episode_start_index(traj, t):
+            return None
+        index = t - 1
+    return int(traj["actions"][index]) if index >= 0 else None
+
+
+def episode_start_indices(traj: Mapping[str, Any]) -> np.ndarray:
+    """Episode start for every snapshot, computed in one pass over terminal flags."""
+    cached = traj.get("_episode_start_indices")
+    if cached is not None:
+        return cached
+    offset = 0 if action_alignment(traj) == "incoming/post-step" else 1
+    starts = np.zeros(len(traj["objects"]), dtype=np.int32)
+    for key in ("terminated", "truncated"):
+        flags = traj.get(key)
+        if flags is None:
+            continue
+        # In an outgoing trajectory, row i's flags describe snapshot i+1.
+        resets = np.flatnonzero(np.asarray(flags, dtype=bool)) + offset + 1
+        resets = resets[resets < len(starts)]
+        starts[resets] = resets
+    return np.maximum.accumulate(starts)
+
+
+def episode_start_index(traj: Mapping[str, Any], t: int) -> int:
+    """First saved snapshot in this episode (terminal snapshots belong to it)."""
+    return int(episode_start_indices(traj)[t])
+
+
+def snapshot_frame_index(traj: Mapping[str, Any], t: int) -> int:
+    """Emulated steps since reset, including stripped warmup when known."""
+    indices = traj.get("frame_indices")
+    if indices is not None:
+        return int(indices[t])
+    start = episode_start_index(traj, t)
+    meta = traj.get("meta", {})
+    warmup = int(meta.get("warmup_noops", meta.get("skip_frames", 0))) if start == 0 else 0
+    offset = 1 if action_alignment(traj) == "incoming/post-step" else 0
+    return max(0, warmup + t - start + offset)
 
 
 def get_frame_objects(traj: Mapping[str, Any], t: int) -> List[Dict[str, Any]]:
@@ -259,3 +338,79 @@ def summarize_trajectory(traj: Mapping[str, Any]) -> str:
         ]
         lines.append(f"  t={t}: " + ", ".join(cats))
     return "\n".join(lines)
+
+
+class TraceIndex:
+    """One trace indexed by unique frame or decision; no inferred rows.
+
+    NPZ frame numbers continue across resets, starting at the first snapshot's
+    native frame. Each row also retains its episode_frame and episode_start.
+    """
+
+    def __init__(self, rows, key):
+        self.rows = {}
+        for row in rows:
+            index = int(row[key])
+            if index in self.rows:
+                raise ValueError(f"Duplicate {key} index: {index}")
+            self.rows[index] = row
+        self.key = key
+
+    @classmethod
+    def load(cls, path, key="frame"):
+        import gzip
+        from pathlib import Path
+        path = Path(path)
+        if path.suffix == ".npz":
+            traj = load_trajectory(str(path))
+            meanings = traj["meta"].get("action_meanings")
+            rows = []
+            frame_offset = 0
+            episode_starts = episode_start_indices(traj)
+            for t, objects in enumerate(traj["objects"]):
+                action = incoming_action(traj, t)
+                episode_frame = snapshot_frame_index(traj, t)
+                if t and episode_starts[t] != episode_starts[t - 1]:
+                    frame_offset = rows[-1]["frame"] + 1 - episode_frame
+                rows.append({"frame": frame_offset + episode_frame,
+                             "episode_frame": episode_frame,
+                             "episode_start": int(episode_starts[t]),
+                             "action": meanings[action] if meanings and action is not None else action,
+                             "reward": float(traj["rewards"][t]), "objects": objects,
+                             "ram": traj["ram"][t].tolist()})
+        else:
+            opener = gzip.open if path.suffix == ".gz" else open
+            with opener(path, "rt") as stream:
+                rows = [json.loads(line) for line in stream if line.strip()]
+        return cls(rows, key)
+
+    def window(self, start, end, fields=None, categories=None):
+        result = []
+        for index in range(int(start), int(end) + 1):
+            if index not in self.rows:
+                continue
+            row = dict(self.rows[index])
+            if categories is not None:
+                for name in ("objects", "objects_before", "objects_after"):
+                    if name in row:
+                        row[name] = [o for o in row[name] if o["category"] in categories]
+            if fields is not None:
+                def get(name):
+                    value = row
+                    for part in name.split('.'):
+                        value = value.get(part) if isinstance(value, dict) else None
+                    return value
+                row = {name: get(name) for name in [self.key, *fields]}
+            result.append(row)
+        return result
+
+    def events(self, kind="reward"):
+        result = []
+        previous = None
+        for index, row in self.rows.items():
+            native = row.get("native", row.get("native_after", {}))
+            value = row.get("reward", 0) if kind == "reward" else row.get(kind, native.get(kind))
+            if (kind == "reward" and value) or (kind != "reward" and previous is not None and value != previous):
+                result.append({self.key: index, kind: value, "room": native.get("room_id", row.get("room_ram"))})
+            previous = value
+        return result

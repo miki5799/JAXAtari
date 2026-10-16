@@ -74,11 +74,41 @@ def make_oc_env(game: str, seed: int, *, render_mode: Optional[str] = "rgb_array
         mode="ram",
         hud=True,
         frameskip=1,
+        repeat_action_probability=0.0,
         obs_mode="obj",
         render_mode=render_mode,
     )
+    _configure_ram_detector(env)
     env.reset(seed=seed)
     return env
+
+
+def _configure_ram_detector(env) -> None:
+    """Promote Montezuma RAM arithmetic only on this recorder instance.
+
+    OCAtari 2.2.1 expressions such as ``406 - ram[46]`` overflow uint8
+    scalar promotion under NumPy 2. Keep ALE's RAM unchanged and preserve
+    OCAtari's previous-position bookkeeping in its normal dispatch helper.
+    """
+    if str(getattr(env, "game_name", "")).lower() != "montezumarevenge":
+        return
+    from ocatari.ram.extract_ram_info import detect_objects_ram
+
+    def detect_signed_ram():
+        detect_objects_ram(
+            env.objects, np.asarray(env.get_ram(), dtype=np.int64),
+            env.game_name, env.hud,
+        )
+
+    env.detect_objects = detect_signed_ram
+
+
+def _skull_history_frame(env) -> List[dict]:
+    """Compact past-only warmup history for slow-moving Montezuma skulls."""
+    return [
+        obj for obj in serialize_oc_objects(env.objects)
+        if obj["category"] == "Skull" and obj["w"] > 0
+    ]
 
 
 def _action_meanings(env) -> List[str]:
@@ -161,23 +191,19 @@ def _get_rgb(env) -> np.ndarray:
 def _snapshot_step(env, action: int, store_frames: bool) -> Tuple[
     int, float, bool, bool, np.ndarray, List[dict], Optional[np.ndarray]
 ]:
-    """Step OCAtari and snapshot RAM/objects/RGB.
+    """Advance ALE exactly once, then snapshot RAM/objects/RGB.
 
-    Some OC games (notably Frostbite) can fail inside OCAtari's object-obs
-    buffer packing even though ``detect_objects()`` succeeded. Fall back to
-    the underlying ALE step + ``detect_objects`` so recording can continue.
+    The recorder does not use packed object observations. OCAtari can fail
+    while packing them *after* stepping ALE; retrying through ALE would apply
+    the action twice. Use its wrapped Gym environment and detector directly.
     """
-    try:
-        obs, reward, terminated, truncated, info = env.step(int(action))
-        del obs, info
-    except ValueError as exc:
-        # OCAtari ``np.array(self._state_buffer_ns)`` inhomogeneous-shape crash.
-        if "inhomogeneous" not in str(exc) and "sequence" not in str(exc).lower():
-            raise
+    if hasattr(env, "_env") and hasattr(env, "detect_objects"):
         obs, reward, terminated, truncated, info = env._env.step(int(action))
-        del obs, info
-        if hasattr(env, "detect_objects"):
-            env.detect_objects()
+        env.detect_objects()
+    else:
+        # Also supports lightweight test environments / OCAtari adapters.
+        obs, reward, terminated, truncated, info = env.step(int(action))
+    del obs, info
     ram = np.asarray(env.get_ram(), dtype=np.uint8)
     objects = serialize_oc_objects(env.objects)
     frame = _get_rgb(env) if store_frames else None
@@ -210,6 +236,9 @@ def record_random(
     rams: List[np.ndarray] = []
     objects: List[List[dict]] = []
     frames: Optional[List[np.ndarray]] = [] if store_frames else None
+    frame_indices: List[int] = []
+    initial_skull_history: List[List[dict]] = [_skull_history_frame(env)]
+    elapsed_frames = 0
 
     done = False
     total = int(skip_frames) + int(steps)
@@ -217,11 +246,17 @@ def record_random(
         if done:
             env.reset(seed=seed + t + 1)
             done = False
+            elapsed_frames = 0
+            if t <= int(skip_frames):
+                initial_skull_history = [_skull_history_frame(env)]
         action = int(rng.integers(0, n_actions))
         a, r, term, trunc, ram, objs, frame = _snapshot_step(env, action, store_frames)
         done = term or trunc
+        elapsed_frames += 1
         # Warmup: step but do not save (avoids spawn / serve artifacts in the traj).
         if t < int(skip_frames):
+            initial_skull_history.append(_skull_history_frame(env))
+            initial_skull_history = initial_skull_history[-16:]
             continue
         actions.append(a)
         rewards.append(r)
@@ -229,6 +264,7 @@ def record_random(
         truncateds.append(trunc)
         rams.append(ram)
         objects.append(objs)
+        frame_indices.append(elapsed_frames)
         if frames is not None and frame is not None:
             frames.append(frame)
 
@@ -240,6 +276,8 @@ def record_random(
         "ram": rams,
         "objects": objects,
         "frames": frames,
+        "frame_indices": frame_indices,
+        "initial_skull_history": initial_skull_history,
     }
 
 
@@ -282,6 +320,9 @@ def record_play(
     rams: List[np.ndarray] = []
     objects: List[List[dict]] = []
     frames: Optional[List[np.ndarray]] = [] if store_frames else None
+    frame_indices: List[int] = []
+    initial_skull_history: List[List[dict]] = [_skull_history_frame(env)]
+    elapsed_frames = 0
 
     paused = False
     running = True
@@ -306,13 +347,19 @@ def record_play(
             if done:
                 env.reset()
                 done = False
+                elapsed_frames = 0
+                if not actions:
+                    initial_skull_history = [_skull_history_frame(env)]
             action = _human_action_from_keys(meanings, pressed)
             a, r, term, trunc, ram, objs, frame = _snapshot_step(
                 env, action, store_frames=store_frames
             )
             done = term or trunc
+            elapsed_frames += 1
             if warmup_left > 0:
                 warmup_left -= 1
+                initial_skull_history.append(_skull_history_frame(env))
+                initial_skull_history = initial_skull_history[-16:]
             else:
                 actions.append(a)
                 rewards.append(r)
@@ -320,6 +367,7 @@ def record_play(
                 truncateds.append(trunc)
                 rams.append(ram)
                 objects.append(objs)
+                frame_indices.append(elapsed_frames)
                 if frames is not None and frame is not None:
                     frames.append(frame)
             display_frame = frame if frame is not None else _get_rgb(env)
@@ -352,6 +400,8 @@ def record_play(
         "ram": rams,
         "objects": objects,
         "frames": frames,
+        "frame_indices": frame_indices,
+        "initial_skull_history": initial_skull_history,
     }
 
 
@@ -426,6 +476,9 @@ def main() -> None:
         "action_meanings": meanings,
         "record_mode": args.mode,
         "skip_frames": int(args.skip_frames),
+        "action_alignment": "incoming/post-step",
+        "repeat_action_probability": 0.0,
+        "initial_skull_history": data["initial_skull_history"],
     }
     out_dir = os.path.dirname(os.path.abspath(args.out))
     if out_dir:
@@ -441,6 +494,7 @@ def main() -> None:
         ram=data["ram"],
         objects=data["objects"],
         frames=data["frames"],
+        frame_indices=data["frame_indices"],
     )
     print(f"Saved {len(data['actions'])} frames → {args.out}")
 

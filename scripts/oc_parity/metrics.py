@@ -305,3 +305,34 @@ def survival_rate(first_diverges: Sequence[Optional[int]], n: int) -> float:
         return 0.0
     survived = sum(1 for fd in first_diverges if fd is None or fd >= n)
     return survived / len(first_diverges)
+
+
+def exact_object_difference(reference, actual):
+    """Exact multiset comparison of public sensor fields, independent of slot order."""
+    from collections import Counter
+    def key(obj):
+        return (obj["category"], obj.get("x"), obj.get("y"),
+                obj.get("width", obj.get("w")), obj.get("height", obj.get("h")),
+                obj.get("value"))
+    def rows(objects):
+        return Counter(key(o) for o in objects if o["category"] != "NoObject")
+    a, b = rows(reference), rows(actual)
+    return {"reference_only": list((a-b).elements()), "JAX_only": list((b-a).elements())}
+
+
+def exact_transition_difference(reference, actual, *, life_offset=1):
+    """Native pose/reward/life comparisons; absent measurements stay unknown."""
+    differences = {}
+    for field in ("player", "reward"):
+        if field in reference and field in actual and reference[field] != actual[field]:
+            differences[field] = {"reference": reference[field], "JAX": actual[field]}
+    if "lives" in reference and "native" in actual:
+        value = actual["native"]["lives"] + life_offset
+        if reference["lives"] != value:
+            differences["lives"] = {"reference": reference["lives"], "JAX": value}
+    if "ram" in reference and "native_rng_a" in actual.get("native", {}):
+        expected = reference["ram"][5:7]
+        value = [actual["native"]["native_rng_a"], actual["native"]["native_rng_b"]]
+        if expected != value:
+            differences["rng"] = {"reference": expected, "JAX": value}
+    return differences

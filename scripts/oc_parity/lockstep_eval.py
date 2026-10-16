@@ -34,6 +34,11 @@ _SCRIPTS_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
+from oc_parity.trajectory_io import (
+    episode_start_index, episode_start_indices, incoming_action,
+    snapshot_frame_index, transition_action,
+)
+
 
 def _map_oc_action_to_jax(env, oc_action: int, meanings: Optional[Sequence[str]]) -> Any:
     """Map an OC/ALE action index onto the JAX env's ACTION_SET index."""
@@ -84,7 +89,11 @@ def _valid_t0_candidates(
             start = max(start, int(ball_t))
     if start > max_t0:
         return []
-    return list(range(start, max_t0 + 1))
+    episode_starts = episode_start_indices(traj)
+    return [
+        t0 for t0 in range(start, max_t0 + 1)
+        if episode_starts[t0 + n - 1] == episode_starts[t0]
+    ]
 
 
 def _sample_t0s(
@@ -121,21 +130,23 @@ def _inject_state(env, jax_key: str, traj: Dict[str, Any], t0: int):
     objs = traj["objects"][t0]
     seed = int(traj.get("meta", {}).get("seed", 0))
     meanings = traj.get("meta", {}).get("action_meanings")
+    episode_start = episode_start_index(traj, t0)
     kwargs: Dict[str, Any] = {
         "seed": seed,
         "frame_index": t0,
+        "elapsed_frames": snapshot_frame_index(traj, t0),
         "action_meanings": meanings,
-        "oc_action": int(traj["actions"][t0]) if traj.get("actions") is not None else None,
+        "oc_action": incoming_action(traj, t0),
         "prev_oc_action": (
-            int(traj["actions"][t0 - 1])
-            if t0 > 0 and traj.get("actions") is not None
+            incoming_action(traj, t0 - 1)
+            if t0 > episode_start and traj.get("actions") is not None
             else None
         ),
     }
 
     prev_xy = None
     prev_player = None
-    if t0 > 0:
+    if t0 > episode_start:
         # Prefer Player; Freeway uses Chicken.
         prev_dicts = objects_as_dicts(traj["objects"][t0 - 1])
         prev_player = find_object(prev_dicts, "Player")
@@ -147,7 +158,7 @@ def _inject_state(env, jax_key: str, traj: Dict[str, Any], t0: int):
     # Multi-frame player XY lookback (BankHeist coasts on alternate frames).
     lookback_n = 16
     xy_lookback: List[Tuple[float, float]] = []
-    t_lo = max(0, t0 - lookback_n + 1)
+    t_lo = max(episode_start, t0 - lookback_n + 1)
     for t in range(t_lo, t0 + 1):
         d = objects_as_dicts(traj["objects"][t])
         p = find_object(d, "Player")
@@ -156,11 +167,20 @@ def _inject_state(env, jax_key: str, traj: Dict[str, Any], t0: int):
         if p is not None and int(p.get("w", 1)) > 0:
             xy_lookback.append((float(p["x"]), float(p["y"])))
     kwargs["player_xy_lookback"] = xy_lookback
+    skull_lookback = []
+    if episode_start == 0 and t_lo == 0:
+        skull_lookback.extend(traj.get("meta", {}).get("initial_skull_history", []))
+    for t in range(t_lo, t0 + 1):
+        skull_lookback.append([
+            o for o in objects_as_dicts(traj["objects"][t])
+            if o.get("category") == "Skull" and int(o.get("w", 0)) > 0
+        ])
+    kwargs["skull_objects_lookback"] = skull_lookback[-lookback_n:]
 
     kwargs["prev_player_y"] = None if prev_xy is None else prev_xy[1]
     kwargs["prev_player_xy"] = prev_xy
     kwargs["prev_enemy_y"] = None
-    if t0 > 0:
+    if t0 > episode_start:
         prev_enemy = find_object(objects_as_dicts(traj["objects"][t0 - 1]), "Enemy")
         if prev_enemy is not None:
             kwargs["prev_enemy_y"] = float(prev_enemy["y"])
@@ -208,6 +228,8 @@ def run_one_lockstep(
     strip_ks: Sequence[int],
     oracle_lookahead: bool = False,
     oracle_horizon: Optional[int] = None,
+    initial_state=None,
+    render_frames: bool = True,
 ) -> Dict[str, Any]:
     from oc_parity.metrics import (
         baseline_relative_pixel_metrics,
@@ -220,7 +242,11 @@ def run_one_lockstep(
     )
 
     meanings = traj.get("meta", {}).get("action_meanings")
-    state = _inject_state(env, jax_key, traj, t0)
+    if n < 1 or t0 < 0 or t0 + n > len(traj["objects"]):
+        raise ValueError("Lockstep window must contain recorded snapshots")
+    if episode_start_index(traj, t0 + n - 1) != episode_start_index(traj, t0):
+        raise ValueError("Lockstep window crosses an episode reset")
+    state = initial_state if initial_state is not None else _inject_state(env, jax_key, traj, t0)
     if oracle_lookahead:
         from oc_parity.oracle_lookahead import apply_oracle_lookahead, supports_oracle
 
@@ -270,8 +296,8 @@ def run_one_lockstep(
         if k == n - 1:
             per_entity_at_end = ent.get("per_entity") or {}
 
-        jax_frame = np.asarray(jitted_render(state), dtype=np.uint8)
-        if traj["frames"] is not None:
+        jax_frame = np.asarray(jitted_render(state), dtype=np.uint8) if render_frames else None
+        if render_frames and traj["frames"] is not None:
             oc_frame = np.asarray(traj["frames"][t], dtype=np.uint8)
             if k == 0:
                 oc0 = oc_frame.copy()
@@ -311,7 +337,7 @@ def run_one_lockstep(
         soft_flags.append(bool(frame["soft_breach"]))
 
         if k < n - 1:
-            oc_a = int(traj["actions"][t])
+            oc_a = transition_action(traj, t)
             jax_a = _map_oc_action_to_jax(env, oc_a, meanings)
             _o, state, _r, _d, _i = jitted_step(state, jax_a)
 
